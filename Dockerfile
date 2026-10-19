@@ -4,14 +4,18 @@
 # NOTE: Use the Debian (glibc) image, not Alpine (musl). Tailwind v4's
 # `@tailwindcss/postcss` and its native `lightningcss`/`oxide` binaries crash
 # the Turbopack PostCSS loader on musl, which fails `next build` in Docker.
-FROM node:20-slim AS deps
+FROM node:24-slim AS deps
 RUN apt-get update -qq \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 COPY package.json package-lock.json* .nvmrc ./
-COPY scripts/check-node.mjs ./scripts/
+# Only the scripts `npm ci` actually invokes are copied here — `preinstall`
+# (`check-node.mjs`) and `prepare` (`install-git-hooks.mjs`). Keeping the copy
+# minimal preserves layer caching; any new lifecycle script must be added here
+# too or `npm ci` fails with "Cannot find module".
+COPY scripts/check-node.mjs scripts/install-git-hooks.mjs ./scripts/
 # Puppeteer (dev-only demo/screenshot scripts) downloads Chrome in its
 # postinstall; skip it — it isn't needed to build or run the server and the
 # download is a flaky network dependency in Docker.
@@ -19,7 +23,10 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 RUN npm ci
 
 # Stage 2: Builder
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
+ARG GIT_SHA
+ENV GIT_SHA=$GIT_SHA
+ENV NEXT_PUBLIC_GIT_SHA=$GIT_SHA
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -31,10 +38,14 @@ RUN npx prisma generate
 RUN npm run build
 
 # Stage 3: Runner
-FROM node:20-slim AS runner
-# `apt-get upgrade` is what keeps the image-scan step green: the node:20-slim
-# base ships snapshot versions of libcap2/libgnutls30/libpcre2 that Debian has
-# since revised, and every one of those findings has a fix in bookworm-updates.
+FROM node:24-slim AS runner
+ARG GIT_SHA
+ENV GIT_SHA=$GIT_SHA
+ENV NEXT_PUBLIC_GIT_SHA=$GIT_SHA
+# `apt-get upgrade` is what keeps the image-scan step green: the node:24-slim
+# base ships snapshot versions of system libraries (libcap2, gnutls, pcre2)
+# that Debian has since revised, and every finding has a fix in the distro's
+# -updates pocket.
 RUN apt-get update -qq \
   && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
@@ -44,8 +55,10 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME="0.0.0.0"
 
 COPY --chown=node:node --from=builder /app/public ./public
+COPY --chown=node:node --from=builder /app/package.json ./package.json
 # .next/standalone already contains a pruned node_modules with exactly the
 # runtime dependencies Next's output tracer selected.  Copying the full
 # builder node_modules on top would double the layer size and ship every
@@ -62,7 +75,7 @@ COPY --chown=node:node --from=builder /app/.next/standalone ./
 COPY --chown=node:node --from=builder /app/.next/static ./.next/static
 # Prisma query engine — copy only the native binary, not the whole CLI.
 # The glob matches the openssl-3.x variant produced by `prisma generate` on
-# the node:20-slim (Debian Bookworm) builder.  The destination mirrors where
+# the node:24-slim (Debian) builder.  The destination mirrors where
 # standalone's own node_modules/.prisma/client/ expects to find the engine.
 COPY --chown=node:node --from=builder /app/node_modules/.prisma/client/*.node ./node_modules/.prisma/client/
 COPY --chown=node:node --from=builder /app/node_modules/@prisma/engines-version ./node_modules/@prisma/engines-version

@@ -4,7 +4,9 @@ Thank you for your interest in contributing! OphirPay is an open-source payment 
 
 ## Getting Started
 
-1. Ensure you have **Node.js 20** installed (see `.nvmrc`) — `npm install`
+> **Fastest path:** Open this repository in a **Devcontainer** (GitHub Codespaces or VS Code). It automatically provisions Node 24, the pinned Rust toolchain + WASM targets, Postgres, and Redis. Just copy `.env.example` to `.env.local` and run `npm run dev`.
+
+1. Ensure you have **Node.js 24** installed (see `.nvmrc`) — `npm install`
    runs a preflight (`scripts/check-node.mjs`) and aborts with an actionable
    message on any other major, so there is no ambiguity about the supported
    runtime
@@ -29,7 +31,7 @@ Thank you for your interest in contributing! OphirPay is an open-source payment 
 
 | Tool | Supported | Declared in |
 |---|---|---|
-| Node.js | **20.x** | `.nvmrc` (`20`), `package.json` → `engines.node` (`20.x`), and `node-version-file: .nvmrc` in every workflow |
+| Node.js | **24.x** | `.nvmrc` (`24`), `package.json` → `engines.node` (`24.x`), and `node-version-file: .nvmrc` in every workflow |
 | npm | **10.x** | `package.json` → `packageManager` (`npm@10.8.2`) |
 
 `.nvmrc` is the single source of truth. `npm install` / `npm ci` run the
@@ -37,7 +39,7 @@ Thank you for your interest in contributing! OphirPay is an open-source payment 
 
 ```
 [ERROR] Unsupported Node.js version.
-  required : Node 20.x (.nvmrc → "20", package.json engines.node → "20.x", packageManager → "npm@10.8.2")
+  required : Node 24.x (.nvmrc → "24", package.json engines.node → "24.x", packageManager → "npm@10.8.2")
   running  : Node 24.14.0
 
 Switch to the supported version and re-run the install:
@@ -45,7 +47,7 @@ Switch to the supported version and re-run the install:
 ```
 
 A running npm major that differs from `packageManager` is reported as a
-warning rather than an error (a newer npm on Node 20 still installs the same
+warning rather than an error (a newer npm on Node 24 still installs the same
 lockfile), but please install with the pinned manager to avoid lockfile churn.
 
 **Bumping the version** — change `.nvmrc` and `engines.node` together, then run
@@ -58,6 +60,47 @@ lockfile), but please install with the pinned manager to avoid lockfile churn.
 - **Branch naming**: `feat/feature-name`, `fix/bug-description`, `docs/what-changed`, `ci/what-changed`, `test/what-changed`
 - **Commits**: Follow [Conventional Commits](https://www.conventionalcommits.org)
 - **Before submitting**: Run `npm run ci` (typecheck → lint → test → build)
+
+### Local secret scanning (pre-commit hook)
+
+`npm install` (via the `prepare` script) points git at the committed
+`.githooks/` directory, so a pre-commit hook scans **staged** changes with
+[gitleaks](https://github.com/gitleaks/gitleaks) before they can reach a branch:
+
+```bash
+npm run prepare          # (re)enable the hook — also runs on `npm install`
+npm run secrets:precommit  # run the scan by hand against the staged changes
+npm run secrets:scan       # scan the whole repo with .gitleaks.toml
+```
+
+What it does:
+
+- Uses the same `.gitleaks.toml` as CI, which extends gitleaks' ~160 default
+  rules **and** adds a strict Stellar secret-seed rule (`S` + 55 base32 chars).
+- Blocks the commit (exit 1) when a seed, API key or private key is staged.
+- Skips with a warning when gitleaks is not installed — run one of
+  ```bash
+  brew install gitleaks                                   # macOS
+  # or grab a release binary: https://github.com/gitleaks/gitleaks/releases
+  ```
+  to enable it. CI still scans every PR regardless, so a bypassed hook never
+  reaches `main` unnoticed.
+
+If gitleaks flags a **documented, non-sensitive** demo value, add it (with a
+short reason) to the `[allowlist]` in `.gitleaks.toml` rather than committing
+with `--no-verify`. Never commit a real key or seed: remove it, rotate the
+credential, and re-stage.
+
+> The hook is committed at `.githooks/pre-commit` and wired via
+> `core.hooksPath` (set by `scripts/install-git-hooks.mjs`) — no husky
+> dependency, and the hook itself is reviewable in the repo.
+
+### Type safety and lint suppressions
+
+Use `unknown` with a type guard or a narrower domain type instead of `any`.
+Type-safety ESLint suppressions should be avoided; when a targeted suppression
+is necessary, keep it to one line and explain why on that line. The zero-warning
+ESLint check runs in CI.
 
 ### Dependency Updates
 
@@ -152,6 +195,19 @@ Configure these in **Settings → Branches → Branch protection rules** for `ma
 > **1 approving review** before it can be merged.
 
 ## Testing
+
+### Soroban contract tests
+
+Both contract crates use the same layout:
+
+- Put unit tests that need private implementation details in
+  `contracts/<crate>/src/test.rs`.
+- Put tests that exercise only the public contract API, including integration
+  and property tests, in `contracts/<crate>/tests/`.
+- Run a crate's complete Rust suite with `cd contracts/<crate> && cargo test`.
+
+This keeps implementation-level tests in the unit-test harness and gives
+public-contract tests the same integration-test harness in both crates.
 
 ```bash
 npm test              # Run all tests (800 frontend)

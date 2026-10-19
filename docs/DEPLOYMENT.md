@@ -6,17 +6,17 @@
 
 ## Table of Contents
 
-- [Prerequisites](#-prerequisites)
-- [Environment Variables](#-environment-variables)
-- [Option 1: Vercel (Recommended)](#-option-1-vercel-recommended)
-- [Option 2: Docker](#-option-2-docker)
-- [Option 3: Standalone Node.js](#-option-3-standalone-nodejs)
-- [Option 4: Kubernetes (Helm)](#-option-4-kubernetes-helm)
-- [Cache Headers for Static Assets and APIs](#-cache-headers-for-static-assets-and-apis)
-- [Soroban Contract Deployment](#-soroban-contract-deployment)
-- [Database Setup](#-database-setup)
-- [Post-Deployment Verification](#-post-deployment-verification)
-- [Troubleshooting](#-troubleshooting)
+- [Prerequisites](#prerequisites)
+- [Environment Variables](#environment-variables)
+- [Option 1: Vercel (Recommended)](#option-1-vercel-recommended)
+- [Option 2: Docker](#option-2-docker)
+- [Option 3: Standalone Node.js](#option-3-standalone-nodejs)
+- [Option 4: Kubernetes (Helm)](#option-4-kubernetes-helm)
+- [Cache Headers for Static Assets and APIs](#cache-headers-for-static-assets-and-apis)
+- [Soroban Contract Deployment](#soroban-contract-deployment)
+- [Database Setup](#database-setup)
+- [Post-Deployment Verification](#post-deployment-verification)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -70,7 +70,7 @@ cp .env.example .env.local
 | `AUTH_RATE_LIMIT_IP_RPM` | `30` | Wallet-auth per-IP requests per minute (`/api/auth/challenge`, `/api/auth/session`) |
 | `AUTH_RATE_LIMIT_WALLET_RPM` | `10` | Wallet-auth per-account requests per minute (keyed by Stellar public key) |
 | `REDIS_URL` | — | Distributed rate limiting. `redis://` = ioredis (Node only); `https://` = Upstash-compatible REST and the only form that shares the *global edge* limit across replicas |
-| `NEXT_PUBLIC_SENTRY_DSN` | — | Sentry error tracking DSN |
+| `NEXT_PUBLIC_SENTRY_DSN` | — | Optional Sentry DSN for client and server error reporting |
 | `NEXT_PUBLIC_DEMO_MODE` | `false` | Enable demo mode |
 | `NEXT_PUBLIC_FEATURE_MULTI_ASSET` | `false` | Enable multi-asset support |
 | `NEXT_PUBLIC_FEATURE_WEBHOOKS` | `false` | Enable webhook features |
@@ -108,7 +108,7 @@ Vercel is the easiest way to deploy OphirPay. The project includes a pre-configu
 2. Go to [vercel.com/new](https://vercel.com/new)
 3. Import your forked repository
 4. Vercel auto-detects Next.js — no configuration needed
-5. Add environment variables in the Vercel dashboard (see [Environment Variables](#-environment-variables))
+5. Add environment variables in the Vercel dashboard (see [Environment Variables](#environment-variables))
 6. Click **Deploy**
 
 ### GitHub Integration
@@ -126,7 +126,7 @@ Push to main → Vercel builds → Preview/Production URL
 
 > `vercel.json` deliberately declares **no** headers. The app layer
 > (`next.config.ts`) owns them all, so Vercel and self-hosted deployments
-> cannot drift apart — see [Cache Headers for Static Assets and APIs](#-cache-headers-for-static-assets-and-apis).
+> cannot drift apart — see [Cache Headers for Static Assets and APIs](#cache-headers-for-static-assets-and-apis).
 
 - `output: "standalone"` is **disabled** on Vercel (detected via `process.env.VERCEL`) — Vercel uses its own runtime
 - `npx prisma generate` runs automatically during build (configured in `vercel.json` → `buildCommand`)
@@ -200,6 +200,16 @@ services:
       - NODE_ENV=production
 ```
 
+### Local Development with Hot Reload (`docker-compose.dev.yml`)
+
+For local development with live code editing and hot reload (`next dev`), use `docker-compose.dev.yml`:
+
+```bash
+docker compose -f docker-compose.dev.yml up
+```
+
+This mounts your local repository files, sets `NODE_ENV=development`, and runs `npm run dev` alongside PostgreSQL and Redis services.
+
 ### Docker Build Only (Without Compose)
 
 ```bash
@@ -225,9 +235,9 @@ The `Dockerfile` uses a 3-stage build:
 
 | Stage | Base Image | Purpose |
 |---|---|---|
-| `deps` | `node:20-slim` | Install npm dependencies (with OpenSSL for Prisma) |
-| `builder` | `node:20-slim` | Generate Prisma client, run `next build` |
-| `runner` | `node:20-slim` | Minimal production image, runs as the non-root `node` user |
+| `deps` | `node:24-slim` | Install npm dependencies (with OpenSSL for Prisma) |
+| `builder` | `node:24-slim` | Generate Prisma client, run `next build` |
+| `runner` | `node:24-slim` | Minimal production image, runs as the non-root `node` user |
 
 **Key details:**
 - Uses **Debian (glibc)**, not Alpine (musl) — Tailwind v4's native binaries require glibc
@@ -581,19 +591,28 @@ DATABASE_URL="postgresql://ophirpay:<password>@<host>:5432/ophirpay" \
 
 ### Connection Pooling (Neon, Supabase)
 
-If your `DATABASE_URL` uses a pooled connection (PgBouncer, Neon), set `DIRECT_DATABASE_URL` for migrations:
+If your `DATABASE_URL` uses a pooled connection (PgBouncer, Neon), Prisma
+migrations need the direct connection. In the committed `prisma/schema.prisma`,
+`directUrl` is commented out, so `DIRECT_DATABASE_URL` alone does not redirect
+Prisma CLI commands. Set `DATABASE_URL` to the direct URL when running
+migrations, or configure `directUrl` in the Prisma datasource:
 
 ```env
 DATABASE_URL=postgresql://user:pass@ep-xxx.pooler.supabase.com:6543/ophirpay
 DIRECT_DATABASE_URL=postgresql://user:pass@ep-xxx.supabase.co:5432/ophirpay
 ```
 
-Prisma uses `DATABASE_URL` at runtime and `DIRECT_DATABASE_URL` for `migrate deploy`.
+The example above documents the two connection strings, but the current
+datasource only reads `DATABASE_URL`. See the
+[Database Provider Compatibility guide](DATABASE_PROVIDERS.md) for details.
 
 ### SQLite (Development Only)
 
 ```bash
-DATABASE_PROVIDER=sqlite npx prisma db push
+# DATABASE_PROVIDER alone does not switch Prisma's datasource.
+# SQLite requires local, uncommitted schema edits first; see:
+# docs/LOCAL_DEV.md and docs/DATABASE_PROVIDERS.md
+npx prisma db push
 ```
 
 > ⚠️ SQLite is for local development only. Production must use PostgreSQL.
@@ -654,7 +673,7 @@ curl -s https://your-domain.com/api/health | jq .database
 |---|---|---|
 | `Prisma generate failed` | Prisma CLI not installed | Run `npx prisma generate` explicitly, or `npm ci` to install devDependencies |
 | `ENOENT: no such file or directory, open '.env'` | Missing `.env` file | Copy `.env.example` to `.env.local` |
-| `tailwindcss/postcss` crash on musl | Alpine Linux uses musl libc | Use the Debian-based Dockerfile (already configured) or switch to `node:20-slim` |
+| `tailwindcss/postcss` crash on musl | Alpine Linux uses musl libc | Use the Debian-based Dockerfile (already configured) or switch to `node:24-slim` |
 | `next build` fails with `ENOENT .next/next-server.js.nft.json` | Standalone mode on Vercel | Already handled — `output` is disabled when `VERCEL` env is set |
 
 ### Database Errors

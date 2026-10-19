@@ -36,7 +36,36 @@ const counters = {
    * malformed requests are rejected before reaching this counter.
    */
   csp_violation_reports_total: 0,
+  /** Gauge: Prisma connection pool queue wait duration in seconds (issue #1412). */
+  database_pool_wait_seconds: 0,
 };
+
+/** Set the Prisma connection pool queue wait time in seconds (issue #1412). */
+export function setDatabasePoolWaitSeconds(seconds: number): void {
+  counters.database_pool_wait_seconds = seconds;
+}
+
+export type CspReportDropReason = "rate_limited" | "deduplicated" | "oversized";
+
+const cspReportsDropped = new Map<CspReportDropReason, number>([
+  ["rate_limited", 0],
+  ["deduplicated", 0],
+  ["oversized", 0],
+]);
+
+/** Increment the counter for dropped CSP violation reports (#1392). */
+export function incCspReportsDropped(reason: CspReportDropReason, delta = 1): void {
+  cspReportsDropped.set(reason, (cspReportsDropped.get(reason) ?? 0) + delta);
+}
+
+/** Get a snapshot of dropped CSP report counts by reason. */
+export function getCspReportsDroppedSnapshot(): Record<CspReportDropReason, number> {
+  return {
+    rate_limited: cspReportsDropped.get("rate_limited") ?? 0,
+    deduplicated: cspReportsDropped.get("deduplicated") ?? 0,
+    oversized: cspReportsDropped.get("oversized") ?? 0,
+  };
+}
 
 /** Last failover snapshot read by a scrape, for diffing gauge/counter gauges. */
 let lastRpcFailover: {
@@ -145,6 +174,7 @@ export function observeDbQuery(durationSeconds: number): void {
 export function getMetricsSnapshot(): typeof counters & {
   delivery_attempts: DeliveryAttemptMetric[];
   delivery_final_outcomes: DeliveryFinalOutcomeMetric[];
+  csp_reports_dropped: Record<CspReportDropReason, number>;
 } {
   return {
     ...counters,
@@ -159,6 +189,7 @@ export function getMetricsSnapshot(): typeof counters & {
         a.attempt_number - b.attempt_number ||
         a.final_outcome.localeCompare(b.final_outcome)
     ),
+    csp_reports_dropped: getCspReportsDroppedSnapshot(),
   };
 }
 
@@ -169,6 +200,14 @@ export function resetMetricsForTest(): void {
   deliveryAttempts.clear();
   deliveryFinalOutcomes.clear();
   lastRpcFailover = null;
+  rpcRequestsTotal.set("2xx", 0);
+  rpcRequestsTotal.set("5xx", 0);
+  rpcLatencySum = 0;
+  rpcLatencyCount = 0;
+  rpcLatencyBuckets.fill(0);
+  for (const reason of ["rate_limited", "deduplicated", "oversized"] as CspReportDropReason[]) {
+    cspReportsDropped.set(reason, 0);
+  }
 }
 
 // ── Per-endpoint latency histograms and error counts ──────────
@@ -184,6 +223,49 @@ export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx";
 export const LATENCY_BUCKET_BOUNDS = [
   0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 ];
+
+const rpcRequestsTotal = new Map<string, number>([
+  ["2xx", 0],
+  ["5xx", 0],
+]);
+
+const rpcLatencyBuckets = new Array(LATENCY_BUCKET_BOUNDS.length + 1).fill(0);
+let rpcLatencySum = 0;
+let rpcLatencyCount = 0;
+
+/** Record Soroban RPC request observation (latency and status class) (issue #1412). */
+export function recordRpcObservation(
+  statusClass: "2xx" | "5xx",
+  durationSeconds: number
+): void {
+  rpcRequestsTotal.set(
+    statusClass,
+    (rpcRequestsTotal.get(statusClass) ?? 0) + 1
+  );
+  rpcLatencySum += durationSeconds;
+  rpcLatencyCount += 1;
+  const bucketIndex = LATENCY_BUCKET_BOUNDS.findIndex(
+    (bound) => durationSeconds <= bound
+  );
+  if (bucketIndex === -1) {
+    rpcLatencyBuckets[LATENCY_BUCKET_BOUNDS.length] += 1;
+  } else {
+    rpcLatencyBuckets[bucketIndex] += 1;
+  }
+}
+
+/** Get snapshot of Soroban RPC metrics (issue #1412). */
+export function getRpcMetricsSnapshot() {
+  return {
+    requestsTotal: {
+      "2xx": rpcRequestsTotal.get("2xx") ?? 0,
+      "5xx": rpcRequestsTotal.get("5xx") ?? 0,
+    },
+    latencySum: rpcLatencySum,
+    latencyCount: rpcLatencyCount,
+    buckets: [...rpcLatencyBuckets],
+  };
+}
 
 export interface EndpointObservation {
   requests: number;

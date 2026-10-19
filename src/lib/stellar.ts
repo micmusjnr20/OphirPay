@@ -18,6 +18,13 @@ import {
   getStellarTimeoutMs,
   withStellarTimeoutProxy,
 } from "./timeout";
+import {
+  getFeeAggressiveness,
+  getFallbackBaseFee,
+  parseFeeStats,
+  recommendFee,
+  type RawFeeStats,
+} from "./fee-stats";
 
 // ── Batch Recipient ───────────────────────────────────────────
 
@@ -99,6 +106,38 @@ export function getSorobanServer(): rpc.Server {
     getSorobanTimeoutMs(),
     "Soroban RPC"
   );
+}
+
+// ── Transaction Fees (issue #825) ──────────────────────────────
+
+/**
+ * Resolve the per-operation fee for a new transaction from Horizon fee
+ * statistics.
+ *
+ * The aggressiveness policy (see `@/lib/fee-stats`) selects a `fee_charged`
+ * percentile, floored at the network base fee, so transactions are bid to
+ * clear during congestion instead of stalling. When `/fee_stats` is
+ * unavailable it degrades to `fetchBaseFee()`, then to the configured
+ * constant, so a Horizon blip can never block transaction building.
+ */
+export async function resolveTransactionFee(
+  server: Horizon.Server
+): Promise<number> {
+  try {
+    const stats = parseFeeStats(
+      (await server.feeStats()) as unknown as RawFeeStats
+    );
+    return recommendFee(stats, getFeeAggressiveness()).recommendedFee;
+  } catch {
+    try {
+      const baseFee = Number(await server.fetchBaseFee());
+      return Number.isFinite(baseFee) && baseFee > 0
+        ? baseFee
+        : getFallbackBaseFee();
+    } catch {
+      return getFallbackBaseFee();
+    }
+  }
 }
 
 // ── Balance Fetching ───────────────────────────────────────────
@@ -373,6 +412,13 @@ export async function findStrictSendPath(params: {
 export interface BuildTxResult {
   xdr: string;
   sourceAccount: Horizon.AccountResponse;
+  /**
+   * Per-operation fee (stroops) baked into the built transaction. Exposed so
+   * the confirmation UI can display the exact fee that was signed rather than
+   * re-deriving it (issue #825: "the fee shown before signing matches the fee
+   * submitted").
+   */
+  fee?: number;
 }
 
 /**
@@ -399,6 +445,12 @@ export async function buildPaymentTx(params: {
   destAssetIssuer?: string;
   destMin?: string;
   path?: Asset[];
+  /**
+   * Explicit per-operation fee in stroops (from the fee selector, #1373).
+   * When omitted or invalid the builder resolves a live recommendation, which
+   * keeps every other caller on the automatic path.
+   */
+  fee?: number;
 }): Promise<BuildTxResult> {
   const {
     sourcePublicKey,
@@ -413,6 +465,7 @@ export async function buildPaymentTx(params: {
     destAssetIssuer,
     destMin,
     path,
+    fee: feeOverride,
   } = params;
 
   const isCrossAsset =
@@ -439,9 +492,15 @@ export async function buildPaymentTx(params: {
   const now = Math.floor(Date.now() / 1000);
 
   const paymentAsset = createAsset(assetCode, assetIssuer);
+  const fee =
+    feeOverride !== undefined &&
+    Number.isSafeInteger(feeOverride) &&
+    feeOverride > 0
+      ? feeOverride
+      : await resolveTransactionFee(server);
 
   let builder = new TransactionBuilder(sourceAccount, {
-    fee: (await server.fetchBaseFee()).toString(),
+    fee: fee.toString(),
     networkPassphrase: NETWORK_PASSPHRASE,
     timebounds: {
       minTime: 0,
@@ -474,7 +533,7 @@ export async function buildPaymentTx(params: {
   }
 
   const tx = builder.build();
-  return { xdr: tx.toXDR(), sourceAccount };
+  return { xdr: tx.toXDR(), sourceAccount, fee };
 }
 
 /**
@@ -493,6 +552,8 @@ export async function buildPathPaymentStrictSendTx(params: {
   destAssetIssuer?: string;
   path?: Asset[];
   memo?: string;
+  /** Explicit per-operation fee in stroops (from the fee selector, #1373). */
+  fee?: number;
 }): Promise<BuildTxResult> {
   const {
     sourcePublicKey,
@@ -505,6 +566,7 @@ export async function buildPathPaymentStrictSendTx(params: {
     destAssetIssuer,
     path = [],
     memo,
+    fee: feeOverride,
   } = params;
 
   const server = getHorizonServer();
@@ -513,9 +575,15 @@ export async function buildPathPaymentStrictSendTx(params: {
 
   const sendAsset = createAsset(sourceAssetCode, sourceAssetIssuer);
   const destAsset = createAsset(destAssetCode, destAssetIssuer);
+  const fee =
+    feeOverride !== undefined &&
+    Number.isSafeInteger(feeOverride) &&
+    feeOverride > 0
+      ? feeOverride
+      : await resolveTransactionFee(server);
 
   let builder = new TransactionBuilder(sourceAccount, {
-    fee: (await server.fetchBaseFee()).toString(),
+    fee: fee.toString(),
     networkPassphrase: NETWORK_PASSPHRASE,
     timebounds: {
       minTime: 0,
@@ -537,7 +605,7 @@ export async function buildPathPaymentStrictSendTx(params: {
   }
 
   const tx = builder.build();
-  return { xdr: tx.toXDR(), sourceAccount };
+  return { xdr: tx.toXDR(), sourceAccount, fee };
 }
 
 /**
@@ -554,10 +622,10 @@ export async function buildBatchPaymentTx(params: {
   const sourceAccount = await server.loadAccount(sourcePublicKey);
 
   const now = Math.floor(Date.now() / 1000);
-  const baseFee = (await server.fetchBaseFee()).toString();
+  const fee = await resolveTransactionFee(server);
 
   let builder = new TransactionBuilder(sourceAccount, {
-    fee: baseFee,
+    fee: fee.toString(),
     networkPassphrase: NETWORK_PASSPHRASE,
     timebounds: {
       minTime: 0,
@@ -576,7 +644,7 @@ export async function buildBatchPaymentTx(params: {
   }
 
   const tx = builder.build();
-  return { xdr: tx.toXDR(), sourceAccount };
+  return { xdr: tx.toXDR(), sourceAccount, fee };
 }
 
 /**

@@ -66,6 +66,7 @@ Complete list of every endpoint declared in [`docs/openapi.yaml`](openapi.yaml).
 | `/api/policy-versions` | GET |
 | `/api/contracts` | GET |
 | `/api/stats` | GET |
+| `/api/assets/metadata` | GET |
 | `/api/batches` | GET, POST |
 | `/api/batches/{id}` | GET, POST |
 | `/api/batches/summary` | GET |
@@ -74,14 +75,19 @@ Complete list of every endpoint declared in [`docs/openapi.yaml`](openapi.yaml).
 | `/api/scheduled` | GET, POST, DELETE |
 | `/api/scheduled/run` | GET, POST |
 | `/api/requests` | GET, POST |
+| `/api/requests/{id}/paid` | POST |
+| `/api/requests/{id}/remind` | POST |
+| `/api/requests/expire` | GET |
 | `/api/webhooks` | GET, POST, PATCH, DELETE |
 | `/api/webhooks/{id}` | GET |
 | `/api/webhooks/{id}/test` | POST |
 | `/api/webhooks/{id}/replay` | POST |
 | `/api/webhooks/{id}/deliveries` | GET |
 | `/api/webhooks/{id}/deliveries/{deliveryId}/redeliver` | POST |
+| `/api/webhooks/{id}/deliveries/requeue` | POST |
 | `/api/keys` | GET, POST, PATCH, DELETE |
 | `/api/keys/stats` | GET |
+| `/api/keys/{id}/rotate` | POST |
 | `/api/multisig` | GET, POST |
 | `/api/multisig/propose` | POST |
 | `/api/multisig/approve` | POST |
@@ -107,6 +113,7 @@ Complete list of every endpoint declared in [`docs/openapi.yaml`](openapi.yaml).
 | `/api/cron` | GET, POST |
 | `/api/jobs/process-due-recurring` | POST |
 | `/api/pause-state` | GET |
+| `/api/openapi.json` | GET |
 
 ---
 
@@ -169,6 +176,29 @@ curl -X DELETE "https://api.ophirpay.com/api/keys/key_01hv89q7a4mpx3n" \
   "message": "API key revoked successfully."
 }
 ```
+
+### Rotate an API Key (24-hour overlap)
+```bash
+curl -X POST "https://api.ophirpay.com/api/keys/key_01hv89q7a4mpx3n/rotate" \
+  -H "Authorization: Bearer ophir_live_sk_8f7b2c9e4a1d0f62b8e3c1a9"
+```
+**Response (`201 Created`):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "key_01hv89q7a4mpz4r",
+    "name": "Production Backend Worker",
+    "prefix": "ophir_live_sk_3d9c1b",
+    "scopes": ["payments:read", "payments:write", "webhooks:manage"],
+    "key": "ophir_live_sk_3d9c1b5e7f4a2c8d0b6e9f1a",
+    "previousPrefix": "ophir_live_sk_8f7b2c",
+    "previousKeyValidUntil": "2026-09-27T18:00:00.000Z"
+  },
+  "meta": { "timestamp": "2026-09-26T18:00:00.000Z" }
+}
+```
+> The previous key keeps authenticating until `previousKeyValidUntil` (24 hours, never past its own expiry), so you can deploy the replacement without an outage. Rotating an already-rotated, revoked, expired, or unknown key returns `400`.
 
 ---
 
@@ -352,23 +382,69 @@ curl -X POST "https://api.ophirpay.com/api/requests" \
   -H "Authorization: Bearer ophir_live_sk_8f7b2c9e4a1d0f62b8e3c1a9" \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Hardware Prototyping Milestone 1",
-    "requestedAmount": "1500.00",
-    "asset": "USDC",
-    "expiresInHours": 72,
-    "recipient": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+    "amount": 1500,
+    "assetCode": "USDC",
+    "description": "Hardware Prototyping Milestone 1",
+    "recipientAddress": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    "recipientEmail": "payer@example.org",
+    "notificationEmail": "finance@example.org",
+    "dueDate": "2026-10-15T00:00:00.000Z"
   }'
 ```
 **Response (`201 Created`):**
 ```json
 {
-  "id": "req_88194fbc",
-  "paymentUrl": "https://ophirpay.com/pay/req_88194fbc",
-  "status": "OPEN",
-  "requestedAmount": "1500.00",
-  "asset": "USDC",
-  "expiresAt": "2026-08-29T18:40:00.000Z",
-  "createdAt": "2026-08-26T18:40:00.000Z"
+  "id": "clx_request_01",
+  "amount": "1500",
+  "assetCode": "USDC",
+  "status": "PENDING",
+  "recipientAddress": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  "recipientEmail": "payer@example.org",
+  "dueDate": "2026-10-15T00:00:00.000Z",
+  "createdAt": "2026-09-29T10:00:00.000Z"
+}
+```
+
+### Send a Payment Reminder
+Reminders require an outstanding request with a payer email address and are limited to one every 24 hours.
+```bash
+curl -X POST "https://api.ophirpay.com/api/requests/clx_request_01/remind" \
+  -H "Authorization: ******"
+```
+**Response (`200 OK`):**
+```json
+{
+  "sent": true,
+  "sentAt": "2026-09-29T10:05:00.000Z"
+}
+```
+
+### Confirm a Payment
+The transaction hash is verified on Stellar against the request recipient, amount, and asset before its status changes.
+```bash
+curl -X POST "https://api.ophirpay.com/api/requests/clx_request_01/paid" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transactionHash": "9b12a84efc713b194d3f5481d9f8e4c3a2105e6b7d8c9a0f1e2d3c4b5a6f7e8d"
+  }'
+```
+**Response (`200 OK`):**
+```json
+{
+  "status": "PAID"
+}
+```
+
+### Expire Overdue Payment Requests
+The scheduled job calls this endpoint with the configured cron secret.
+```bash
+curl "https://api.ophirpay.com/api/requests/expire" \
+  -H "x-cron-secret: $CRON_SECRET"
+```
+**Response (`200 OK`):**
+```json
+{
+  "expired": 3
 }
 ```
 
@@ -489,6 +565,25 @@ curl -X POST "https://api.ophirpay.com/api/webhooks" \
 }
 ```
 
+### Requeue Dead-Lettered Webhook Deliveries
+```bash
+curl -X POST "https://api.ophirpay.com/api/webhooks/{id}/deliveries/requeue" \
+  -H "Authorization: Bearer ophir_live_sk_8f7b2c9e4a1d0f62b8e3c1a9" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "statusCodes": [500, 502, 504],
+    "olderThanMs": 60000
+  }'
+```
+**Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "requeuedCount": 3,
+  "webhookId": "wh_019a99824c"
+}
+```
+
 ---
 
 ## 9. Multisig & Governance
@@ -584,6 +679,28 @@ curl -X POST "https://api.ophirpay.com/api/refunds" \
   "createdAt": "2026-08-26T19:05:00.000Z"
 }
 ```
+
+### Resolve a Custom Asset's Display Name
+```bash
+curl -X GET "https://api.ophirpay.com/api/assets/metadata?code=USDC&issuer=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+```
+**Response (`200 OK`):**
+```json
+{
+  "success": true,
+  "data": {
+    "code": "USDC",
+    "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    "name": "USD Coin",
+    "homeDomain": "centre.io",
+    "source": "toml",
+    "fetchedAt": "2026-09-28T12:00:00.000Z"
+  }
+}
+```
+Metadata is read from the issuer's SEP-1 `stellar.toml`; an unknown or
+unreachable issuer returns `name: null` with `source: "fallback"` so callers
+render the raw code and issuer.
 
 ---
 
@@ -776,3 +893,28 @@ curl -X POST https://api.ophirpay.com/api/csp-report \
     }
   }]'
 ```
+
+---
+
+## 13. OpenAPI Specification
+
+### Fetch OpenAPI Specification (`/api/openapi.json`)
+
+Fetch the machine-readable OpenAPI 3.1.0 JSON document for client generation, API testing, or tooling integration:
+
+```bash
+curl "https://api.ophirpay.com/api/openapi.json"
+```
+
+**Response (`200 OK` - Application/JSON):**
+```json
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OphirPay API",
+    "version": "0.1.0"
+  },
+  "paths": { ... }
+}
+```
+

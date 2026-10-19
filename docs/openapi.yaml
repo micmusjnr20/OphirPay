@@ -30,12 +30,18 @@ servers:
     description: Local development
   - url: https://api.ophirpay.com
     description: Production
+  - url: https://soroban-testnet.stellar.org
+    description: Stellar Soroban Testnet RPC
+  - url: https://horizon-testnet.stellar.org
+    description: Stellar Horizon Testnet
 
 security:
   - ApiKeyAuth: []
   - BearerAuth: []
 
 tags:
+  - name: Documentation
+    description: OpenAPI specification and interactive documentation
   - name: Payments
     description: Individual payment operations
   - name: Batches
@@ -82,6 +88,8 @@ tags:
     description: Contract deployment info and version
   - name: Stats
     description: Aggregate on-chain contract statistics
+  - name: Assets
+    description: Asset metadata resolved from the issuer's SEP-1 TOML
   - name: Session
     description: Wallet session issuance and revocation
 
@@ -144,9 +152,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/PaginatedPayments"
         "400":
-          $ref: "#/components/responses/ValidationError"
+          description: >-
+            RFC 7807 problem details — a filter or cursor failed validation.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: RFC 7807 problem details — no authenticated caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
     post:
       tags: [Payments]
       summary: Create a payment
@@ -197,9 +214,25 @@ paths:
                     meta:
                       timestamp: "2026-09-29T10:00:00.000Z"
         "400":
-          $ref: "#/components/responses/ValidationError"
+          description: >-
+            RFC 7807 problem details. Zod rejections carry one `errors[]` entry
+            per invalid field (including an oversized or badly encoded memo).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "401":
+          description: RFC 7807 problem details — no authenticated caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
         "500":
-          $ref: "#/components/responses/ServerError"
+          description: RFC 7807 problem details — an unexpected server failure.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   /api/payments/{id}:
     get:
@@ -294,15 +327,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/PaymentEnvelopeResponse"
         "400":
-          $ref: "#/components/responses/ValidationError"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Payment is not in a retryable (FAILED) state
+          description: RFC 7807 problem details — the body failed validation.
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/ProblemDetails"
+        "401":
+          description: RFC 7807 problem details — no authenticated caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "404":
+          description: RFC 7807 problem details — no such payment for this caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "409":
+          description: >-
+            RFC 7807 problem details — the payment is not in a retryable
+            (FAILED) state. `code` is `STATE_CONFLICT`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   /api/payments/cancel:
     post:
@@ -328,11 +377,23 @@ paths:
         "200":
           description: Payment cancelled
         "400":
-          $ref: "#/components/responses/ValidationError"
+          description: RFC 7807 problem details — `txHash` is missing or invalid.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: RFC 7807 problem details — no authenticated caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: RFC 7807 problem details — no such payment for this caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   /api/payments/export:
     get:
@@ -343,8 +404,14 @@ paths:
         matching `status` / `search` (the same filters as GET /api/payments),
         not just the page loaded in the browser. Returns a dated CSV
         attachment that includes all key fields plus memo and transaction hash.
-        The response includes an `X-Export-Truncated` header set to `true`
-        when the result set exceeds the export row cap.
+
+        The response is **streamed**: the CSV header is sent immediately, then
+        rows are flushed in 250-row chunks as they are pulled from the database
+        with a Prisma cursor (`Transfer-Encoding: chunked`). Memory use is flat
+        regardless of how many rows match, and there is no row cap — the export
+        never silently omits rows. If the database fails after the headers are
+        sent, the stream is errored so the download fails instead of producing
+        a truncated file that looks complete.
       security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }]
       parameters:
         - name: status
@@ -361,21 +428,25 @@ paths:
           description: Only export payments matching this search term
       responses:
         "200":
-          description: CSV attachment with the matching payment rows
-          headers:
-            X-Export-Truncated:
-              description: true when the result set was truncated to the export cap
-              schema:
-                type: string
-                enum: ["true", "false"]
+          description: >-
+            Streamed CSV attachment with the matching payment rows
+            (`Transfer-Encoding: chunked`).
           content:
             text/csv:
               schema:
                 type: string
         "400":
-          $ref: "#/components/responses/ValidationError"
+          description: RFC 7807 problem details — an unknown `status` filter.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: RFC 7807 problem details — no authenticated caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   # ── Escrows ───────────────────────────────────────────────
   /api/escrows:
@@ -528,6 +599,37 @@ paths:
           description: Role assignment(s)
         "401":
           $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [RBAC]
+      summary: Authorize a role change (sudo step-up)
+      description: >
+        Server-side step-up gate for role grants and revocations (issue #1389).
+        The on-chain write is performed by the connected wallet, but it must be
+        authorized here first. Returns 403 SUDO_REQUIRED with a wallet challenge
+        when the session's last cryptographic verification is older than 15
+        minutes; retry with the signed challenge to authorize the mutation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, address]
+              properties:
+                action: { type: string, enum: [grant, revoke] }
+                address: { type: string, description: "Stellar account address (G…, 56 characters)" }
+                role: { type: integer, minimum: 0, maximum: 2, description: "0 Admin, 1 Operator, 2 Auditor; required for grant" }
+                challenge: { type: string, description: "Step-up challenge, present only on the retry" }
+                signature: { type: string, description: "Wallet signature over the challenge message, present only on the retry" }
+      responses:
+        "200":
+          description: Action authorized
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   # ── Fee Config ────────────────────────────────────────────
   /api/fee-config:
@@ -540,6 +642,42 @@ paths:
           description: Fee configuration
         "401":
           $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Fee Config]
+      summary: Authorize a fee-configuration change (sudo step-up)
+      description: >
+        Server-side step-up gate for fee-config changes (issue #1389). The
+        on-chain write is performed by the connected wallet, but it must be
+        authorized here first. Returns 403 SUDO_REQUIRED with a wallet challenge
+        when the session's last cryptographic verification is older than 15
+        minutes; retry with the signed challenge to authorize the mutation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [set_fee_config, set_fee_collector] }
+                paymentFeeBps: { type: integer, minimum: 0, maximum: 1000 }
+                escrowFeeBps: { type: integer, minimum: 0, maximum: 1000 }
+                streamFeeBps: { type: integer, minimum: 0, maximum: 1000 }
+                batchBaseFee: { type: integer, minimum: 0 }
+                batchPerItemFee: { type: integer, minimum: 0 }
+                enabled: { type: boolean }
+                collector: { type: string, description: "Fee collector address; required for set_fee_collector" }
+                challenge: { type: string, description: "Step-up challenge, present only on the retry" }
+                signature: { type: string, description: "Wallet signature over the challenge message, present only on the retry" }
+      responses:
+        "200":
+          description: Action authorized
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/fee-config/collector:
     get:
@@ -598,6 +736,45 @@ paths:
           description: Payment/escrow/stream/batch counters and total amounts
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  # ── Assets ────────────────────────────────────────────────
+  /api/assets/metadata:
+    get:
+      tags: [Assets]
+      summary: Resolve asset metadata from the issuer's SEP-1 TOML
+      description: |
+        Looks up the issuer account's `home_domain` on Horizon, fetches and
+        validates that domain's `stellar.toml` (shared timeout + 100 KiB size
+        limit, DNS/URL safety guard), and returns the matching `[[CURRENCIES]]`
+        entry so custom assets can display a ticker and issuer name.
+
+        Results are cached per issuer domain for `ASSET_METADATA_TTL_MS`.
+        Unknown or unreachable metadata degrades to `code` plus `issuer` with
+        `name: null` and `source: fallback` — never an error (issue #824).
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string, maxLength: 12 }
+          description: Asset code (e.g. USDC)
+        - name: issuer
+          in: query
+          required: true
+          schema: { type: string, pattern: "^G[A-Z0-9]{55}$" }
+          description: Stellar account that issues the asset
+      responses:
+        "200":
+          description: Resolved asset metadata (or a fallback code + issuer)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, const: true }
+                  data:
+                    $ref: "#/components/schemas/AssetMetadata"
+        "400":
+          $ref: "#/components/responses/ValidationError"
 
   # ── Batches ────────────────────────────────────────────────
   /api/batches:
@@ -1016,6 +1193,62 @@ paths:
           description: Payment request created
         "400":
           $ref: "#/components/responses/ValidationError"
+  /api/requests/{id}/paid:
+    post:
+      tags: [Payment Requests]
+      summary: Confirm payment for a payment request
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transactionHash]
+              properties:
+                transactionHash: { type: string }
+      responses:
+        "200":
+          description: Payment request marked as paid
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/requests/{id}/remind:
+    post:
+      tags: [Payment Requests]
+      summary: Email a reminder for a payment request
+      security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Reminder email sent
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/requests/expire:
+    get:
+      tags: [Payment Requests]
+      summary: Expire overdue payment requests
+      description: Invoked by the scheduled job with the configured cron secret.
+      responses:
+        "200":
+          description: Number of payment requests expired
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Expiry scheduler is not configured
 
   # ── Webhooks ──────────────────────────────────────────────
   /api/webhooks:
@@ -1254,6 +1487,46 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/webhooks/{id}/deliveries/requeue:
+    post:
+      tags: [Webhooks]
+      summary: Requeue dead-lettered webhook deliveries for retry
+      description: |
+        Filters and bulk-requeues dead-lettered or failed webhook deliveries.
+        Resets delivery attempts to 0 and transitions status to PENDING for
+        worker redelivery.
+      security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                statusCodes:
+                  type: array
+                  items: { type: integer }
+                onlyTimeouts:
+                  type: boolean
+                limit:
+                  type: integer
+                deliveryIds:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Requeue operation summary
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   # ── API Keys ──────────────────────────────────────────────
   /api/keys:
     get:
@@ -1268,6 +1541,14 @@ paths:
     post:
       tags: [API Keys]
       summary: Generate a new API key (raw key shown once)
+      description: |
+        Creates a key for the authenticated account and returns the raw value
+        exactly once. The account may hold at most five active keys; creation
+        is refused with 409 once the cap is reached.
+
+        Create and rotate share a sliding quota of 10 operations per account
+        per hour, beyond which the endpoint returns 429. Successful creation is
+        recorded in the audit log as `api_key:create`.
       security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }]
       requestBody:
         required: true
@@ -1316,6 +1597,28 @@ paths:
                         description: Raw API key — shown only once
         "400":
           $ref: "#/components/responses/ValidationError"
+        "409":
+          description: >
+            The account already holds the maximum number of active API keys
+            (5). Revoke or rotate an existing key before creating another.
+        "429":
+          description: >
+            Hourly API-key create/rotate quota exhausted (10 operations per
+            account per hour). `Retry-After` and `error.details.resetAt` carry
+            the reset time.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+            X-RateLimit-Limit:
+              schema: { type: integer }
+            X-RateLimit-Remaining:
+              schema: { type: integer }
+            X-RateLimit-Reset:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     patch:
       tags: [API Keys]
       summary: Update the scopes of an existing API key
@@ -1359,6 +1662,87 @@ paths:
           description: Key revoked
         "400":
           description: Missing key ID
+
+  /api/keys/{id}/rotate:
+    post:
+      tags: [API Keys]
+      summary: Rotate an API key with a 24-hour overlap
+      description: |
+        Atomically issues a replacement key for `id` and gives the previous key
+        a 24-hour overlap (never extending its own expiry), so consumers can
+        deploy the new credential without an authentication outage.
+
+        The previous key keeps working until `previousKeyValidUntil`; after
+        that it is rejected. Rotating an already-rotated, revoked, expired, or
+        unknown key returns 400 rather than minting a second replacement, and
+        the rotation is recorded in the audit log as `api_key:rotate`,
+        including `details.initiatedBy` (the wallet or API key that requested
+        it).
+
+        Rotation shares the create quota: 10 create/rotate operations per
+        account per hour, after which the endpoint returns 429.
+      security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: API key ID to rotate
+          schema: { type: string }
+      responses:
+        "201":
+          description: Replacement key issued — store its raw `key` immediately
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, const: true }
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        description: ID of the replacement key
+                      name: { type: string }
+                      prefix: { type: string }
+                      scopes:
+                        type: array
+                        items: { type: string }
+                      key:
+                        type: string
+                        description: Raw replacement API key — shown only once
+                      previousPrefix: { type: string }
+                      previousKeyValidUntil:
+                        type: string
+                        format: date-time
+                        description: >
+                          End of the overlap window, after which the previous
+                          key stops authenticating
+        "400":
+          description: Key not found, expired, or already rotated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          description: >
+            Hourly API-key create/rotate quota exhausted. `Retry-After` and
+            `error.details.resetAt` carry the reset time.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+            X-RateLimit-Limit:
+              schema: { type: integer }
+            X-RateLimit-Remaining:
+              schema: { type: integer }
+            X-RateLimit-Reset:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ServerError"
 
   /api/keys/stats:
     get:
@@ -2250,6 +2634,25 @@ paths:
         "413":
           description: Body exceeds the 16 KiB size limit
 
+  # ── Documentation ─────────────────────────────────────────
+  /api/openapi.json:
+    get:
+      tags: [Documentation]
+      summary: OpenAPI specification in JSON format
+      description: |
+        Returns the parsed OpenAPI 3.1.0 specification for OphirPay in JSON
+        format. Used by internal interactive documentation at `/docs/api`,
+        developer SDK generators, Postman/Insomnia imports, and external tooling.
+      security: []
+      responses:
+        "200":
+          description: Parsed OpenAPI specification document
+          content:
+            application/json:
+              schema:
+                type: object
+                description: OpenAPI 3.1.0 specification object
+
 # ── Components ────────────────────────────────────────────────
 components:
   securitySchemes:
@@ -2265,6 +2668,23 @@ components:
       description: Same API key, passed as Bearer token
 
   schemas:
+    AssetMetadata:
+      type: object
+      description: Display metadata resolved from the issuer's SEP-1 stellar.toml
+      properties:
+        code: { type: string }
+        issuer: { type: string }
+        name: { type: [string, 'null'], description: 'Human display name from the [[CURRENCIES]] table' }
+        description: { type: [string, 'null'] }
+        image: { type: [string, 'null'] }
+        decimals: { type: [integer, 'null'] }
+        orgName: { type: [string, 'null'] }
+        homeDomain: { type: [string, 'null'], description: Issuer's home domain, when resolved }
+        source:
+          type: string
+          enum: [toml, cache, fallback]
+        fetchedAt: { type: string, format: date-time }
+
     PaymentResponse:
       type: object
       properties:
@@ -2415,7 +2835,20 @@ components:
           maxLength: 200
         memo:
           type: string
-          maxLength: 28
+          description: >-
+            Stellar memo to attach. For `MEMO_TEXT` (the default) the limit is
+            28 **UTF-8 bytes**, not characters — `"🚀".repeat(8)` is 8
+            characters but 32 bytes and is rejected. `MEMO_HASH`/
+            `MEMO_RETURN` carry exactly 64 hex characters and `MEMO_ID` an
+            unsigned 64-bit decimal integer.
+        memoType:
+          type: string
+          enum: [MEMO_TEXT, MEMO_ID, MEMO_HASH, MEMO_RETURN]
+          default: MEMO_TEXT
+          description: >-
+            Encoding of `memo`. Omitted means `MEMO_TEXT`, so text-only clients
+            are unaffected. Lowercase aliases (`text`, `id`, `hash`, `return`)
+            are accepted and normalized.
         sourceAccountId:
           type: string
           description: Source Stellar account
@@ -2611,6 +3044,10 @@ components:
 
     ErrorResponse:
       type: object
+      description: >-
+        Legacy error envelope still used by most routes. The payment mutation
+        routes (`POST /api/payments`, `/cancel`, `/retry`) answer with
+        `ProblemDetails` instead.
       properties:
         success: { type: boolean, const: false }
         error:
@@ -2618,6 +3055,64 @@ components:
           properties:
             code: { type: string }
             message: { type: string }
+
+    ProblemFieldError:
+      type: object
+      description: One invalid request field.
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: Dotted path of the field, e.g. `memo` or `recipients.0.address`.
+        message:
+          type: string
+          description: User-facing explanation, safe to display next to the input.
+        code:
+          type: string
+          description: Machine-readable reason (e.g. the underlying Zod issue code).
+
+    ProblemDetails:
+      type: object
+      description: |
+        RFC 7807 / RFC 9457 problem details, served as
+        `application/problem+json`.
+
+        `type` identifies the problem *class* (a stable documentation URI),
+        `title` names it, and `detail` explains this particular occurrence.
+        `code` and `errors` are extension members carrying the OphirPay error
+        code from the catalog and the per-field validation failures.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: >-
+            Stable URI for the problem class, e.g.
+            `https://ophirpay.dev/problems/memo-too-long`. `about:blank` when no
+            specific type applies.
+        title:
+          type: string
+          description: Short, human-readable summary of the problem class.
+        status:
+          type: integer
+          description: HTTP status code, repeated here for log-only consumers.
+        detail:
+          type: string
+          description: Request-specific explanation, safe to display.
+        instance:
+          type: string
+          description: Path of the request that produced the problem.
+        code:
+          type: string
+          description: OphirPay error code (`VALIDATION_ERROR`, `MEMO_TOO_LONG`, …).
+        requestId:
+          type: string
+          description: Mirrors the `X-Request-Id` response header.
+        errors:
+          type: array
+          description: Per-field validation failures, when the request had a body.
+          items:
+            $ref: "#/components/schemas/ProblemFieldError"
 
   responses:
     ValidationError:
